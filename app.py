@@ -165,7 +165,8 @@ if ticker_input:
         try:
             result, data = load_data(ticker_input)
         except Exception as e:
-            st.error(f"Could not load data for **{ticker_input}**. Check the ticker and try again.")
+            st.error(f"Could not load data for **{ticker_input}**.")
+            st.exception(e)
             st.stop()
 
     # ── Company header ────────────────────────────────────────────────────────
