@@ -1,4 +1,11 @@
 import yfinance as yf
+import requests
+
+# Use a browser-like session to avoid yfinance blocks on cloud servers
+session = requests.Session()
+session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+})
 
 
 def get_fundamentals(ticker: str) -> dict:
@@ -7,7 +14,7 @@ def get_fundamentals(ticker: str) -> dict:
     Returns a dictionary of metrics, with None for any unavailable values.
     """
 
-    stock = yf.Ticker(ticker)
+    stock = yf.Ticker(ticker, session=session)
     info = stock.info
 
     # --- Helper to safely pull values ---
@@ -198,3 +205,7 @@ def print_fundamentals(ticker: str):
     print()
 
 
+if __name__ == "__main__":
+    # Quick test — run this file directly to see output
+    print_fundamentals("AAPL")
+    print_fundamentals("TSLA")
