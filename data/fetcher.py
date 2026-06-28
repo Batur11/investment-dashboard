@@ -1,211 +1,150 @@
-import yfinance as yf
+import os
 import requests
+from dotenv import load_dotenv
 
-# Use a browser-like session to avoid yfinance blocks on cloud servers
-session = requests.Session()
-session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-})
+load_dotenv()
+
+FINNHUB_KEY = os.getenv("FINNHUB_API_KEY")
+FINNHUB_BASE = "https://finnhub.io/api/v1"
 
 
-def get_fundamentals(ticker: str) -> dict:
-    """
-    Fetch key financial metrics for a given ticker symbol.
-    Returns a dictionary of metrics, with None for any unavailable values.
-    """
+def fh_get(endpoint, params={}):
+    try:
+        params["token"] = FINNHUB_KEY
+        r = requests.get(f"{FINNHUB_BASE}/{endpoint}", params=params, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        return data if data else None
+    except Exception:
+        return None
 
-    stock = yf.Ticker(ticker, session=session)
-    info = stock.info
 
-    # --- Helper to safely pull values ---
-    def get(key, default=None):
-        val = info.get(key, default)
-        # yfinance sometimes returns 'Infinity' or 0 for missing data
-        if val in [float('inf'), float('-inf')]:
+def get_fundamentals(ticker):
+    ticker = ticker.upper()
+
+    profile  = fh_get("stock/profile2", {"symbol": ticker}) or {}
+    metrics  = fh_get("stock/metric",   {"symbol": ticker, "metric": "all"}) or {}
+    quote    = fh_get("quote",          {"symbol": ticker}) or {}
+
+    m = metrics.get("metric", {})
+
+    def g(source, *keys):
+        for key in keys:
+            val = source.get(key)
+            if val is not None and val != 0:
+                return val
+        return None
+
+    def to_decimal(val):
+        if val is None:
             return None
-        return val
+        return val / 100 if abs(val) > 1 else val
 
-    # --- Identity ---
-    name        = get("shortName") or get("longName")
-    sector      = get("sector")
-    industry    = get("industry")
-    country     = get("country")
-    currency    = get("currency", "USD")
-    exchange    = get("exchange")
+    name     = g(profile, "name")
+    sector   = g(profile, "finnhubIndustry")
+    industry = g(profile, "finnhubIndustry")
+    country  = g(profile, "country")
+    currency = g(profile, "currency") or "USD"
+    exchange = g(profile, "exchange")
 
-    # --- Price & Size ---
-    current_price   = get("currentPrice") or get("regularMarketPrice")
-    market_cap      = get("marketCap")
-    week_52_high    = get("fiftyTwoWeekHigh")
-    week_52_low     = get("fiftyTwoWeekLow")
-    avg_volume      = get("averageVolume")
+    current_price = g(quote, "c")
+    market_cap    = profile.get("marketCapitalization")
+    if market_cap:
+        market_cap = market_cap * 1_000_000
 
-    # --- Valuation ---
-    pe_trailing     = get("trailingPE")
-    pe_forward      = get("forwardPE")
-    pb_ratio        = get("priceToBook")
-    ps_ratio        = get("priceToSalesTrailing12Months")
-    ev_ebitda       = get("enterpriseToEbitda")
-    peg_ratio       = get("pegRatio")
+    week_52_high = g(m, "52WeekHigh")
+    week_52_low  = g(m, "52WeekLow")
+    avg_volume   = g(m, "3MonthAverageTradingVolume")
 
-    # --- Profitability ---
-    gross_margin    = get("grossMargins")
-    operating_margin = get("operatingMargins")
-    net_margin      = get("profitMargins")
-    roe             = get("returnOnEquity")
-    roa             = get("returnOnAssets")
-
-    # --- Growth ---
-    revenue_growth  = get("revenueGrowth")       # YoY
-    earnings_growth = get("earningsGrowth")       # YoY
-    revenue_ttm     = get("totalRevenue")
-    earnings_ttm    = get("netIncomeToCommon")
-
-    # --- Financial Health ---
-    debt_to_equity  = get("debtToEquity")
-    current_ratio   = get("currentRatio")
-    quick_ratio     = get("quickRatio")
-    free_cash_flow  = get("freeCashflow")
-    total_cash      = get("totalCash")
-    total_debt      = get("totalDebt")
-
-    # --- Dividends ---
-    dividend_yield  = get("dividendYield")
-    payout_ratio    = get("payoutRatio")
-
-    # --- Analyst Sentiment ---
-    analyst_target  = get("targetMeanPrice")
-    recommendation  = get("recommendationKey")   # e.g. "buy", "hold", "sell"
-
-    # --- 52-week position (0 = at low, 1 = at high) ---
     if week_52_high and week_52_low and current_price:
         price_range = week_52_high - week_52_low
         week_52_position = (current_price - week_52_low) / price_range if price_range > 0 else None
     else:
         week_52_position = None
 
+    pe_trailing = g(m, "peExclExtraTTM", "peTTM")
+    pe_forward  = g(m, "peNormalizedAnnual")
+    pb_ratio    = g(m, "pbAnnual", "pbQuarterly")
+    ps_ratio    = g(m, "psTTM", "psAnnual")
+    ev_ebitda   = g(m, "evEbitdaTTM", "evEbitdaAnnual")
+    peg_ratio   = g(m, "pegyrFwdEpsGrowth5Y")
+
+    gross_margin     = to_decimal(g(m, "grossMarginTTM", "grossMarginAnnual"))
+    operating_margin = to_decimal(g(m, "operatingMarginTTM", "operatingMarginAnnual"))
+    net_margin       = to_decimal(g(m, "netProfitMarginTTM", "netProfitMarginAnnual"))
+    roe              = to_decimal(g(m, "roeTTM", "roeAnnual"))
+    roa              = to_decimal(g(m, "roaTTM", "roaAnnual"))
+
+    revenue_growth  = to_decimal(g(m, "revenueGrowthTTMYoy", "revenueGrowth5Y"))
+    earnings_growth = to_decimal(g(m, "epsGrowthTTMYoy", "epsGrowth5Y"))
+    revenue_ttm     = g(m, "revenueTTM", "revenueAnnual")
+    earnings_ttm    = g(m, "epsTTM", "epsAnnual")
+
+    debt_to_equity = g(m, "totalDebt/totalEquityAnnual", "totalDebt/totalEquityQuarterly")
+    current_ratio  = g(m, "currentRatioAnnual", "currentRatioQuarterly")
+    quick_ratio    = g(m, "quickRatioAnnual", "quickRatioQuarterly")
+    free_cash_flow = g(m, "freeCashFlowTTM", "freeCashFlowAnnual")
+    if free_cash_flow:
+        free_cash_flow = free_cash_flow * 1_000_000
+    total_cash = g(m, "cashAndEquivalentsAnnual")
+    if total_cash:
+        total_cash = total_cash * 1_000_000
+    total_debt     = g(m, "longTermDebt/equityAnnual")
+    dividend_yield = to_decimal(g(m, "dividendYieldIndicatedAnnual"))
+    payout_ratio   = to_decimal(g(m, "payoutRatioAnnual"))
+    analyst_target = g(m, "targetPrice")
+
     return {
-        # Identity
-        "ticker":               ticker.upper(),
-        "name":                 name,
-        "sector":               sector,
-        "industry":             industry,
-        "country":              country,
-        "currency":             currency,
-        "exchange":             exchange,
-
-        # Price & Size
-        "current_price":        current_price,
-        "market_cap":           market_cap,
-        "week_52_high":         week_52_high,
-        "week_52_low":          week_52_low,
-        "week_52_position":     week_52_position,
-        "avg_volume":           avg_volume,
-
-        # Valuation
-        "pe_trailing":          pe_trailing,
-        "pe_forward":           pe_forward,
-        "pb_ratio":             pb_ratio,
-        "ps_ratio":             ps_ratio,
-        "ev_ebitda":            ev_ebitda,
-        "peg_ratio":            peg_ratio,
-
-        # Profitability
-        "gross_margin":         gross_margin,
-        "operating_margin":     operating_margin,
-        "net_margin":           net_margin,
-        "roe":                  roe,
-        "roa":                  roa,
-
-        # Growth
-        "revenue_growth":       revenue_growth,
-        "earnings_growth":      earnings_growth,
-        "revenue_ttm":          revenue_ttm,
-        "earnings_ttm":         earnings_ttm,
-
-        # Financial Health
-        "debt_to_equity":       debt_to_equity,
-        "current_ratio":        current_ratio,
-        "quick_ratio":          quick_ratio,
-        "free_cash_flow":       free_cash_flow,
-        "total_cash":           total_cash,
-        "total_debt":           total_debt,
-
-        # Dividends
-        "dividend_yield":       dividend_yield,
-        "payout_ratio":         payout_ratio,
-
-        # Analyst Sentiment
-        "analyst_target":       analyst_target,
-        "recommendation":       recommendation,
+        "ticker": ticker, "name": name, "sector": sector,
+        "industry": industry, "country": country, "currency": currency,
+        "exchange": exchange, "current_price": current_price,
+        "market_cap": market_cap, "week_52_high": week_52_high,
+        "week_52_low": week_52_low, "week_52_position": week_52_position,
+        "avg_volume": avg_volume, "pe_trailing": pe_trailing,
+        "pe_forward": pe_forward, "pb_ratio": pb_ratio,
+        "ps_ratio": ps_ratio, "ev_ebitda": ev_ebitda,
+        "peg_ratio": peg_ratio, "gross_margin": gross_margin,
+        "operating_margin": operating_margin, "net_margin": net_margin,
+        "roe": roe, "roa": roa, "revenue_growth": revenue_growth,
+        "earnings_growth": earnings_growth, "revenue_ttm": revenue_ttm,
+        "earnings_ttm": earnings_ttm, "debt_to_equity": debt_to_equity,
+        "current_ratio": current_ratio, "quick_ratio": quick_ratio,
+        "free_cash_flow": free_cash_flow, "total_cash": total_cash,
+        "total_debt": total_debt, "dividend_yield": dividend_yield,
+        "payout_ratio": payout_ratio, "analyst_target": analyst_target,
+        "recommendation": None,
     }
 
 
-def print_fundamentals(ticker: str):
-    """Fetch and print fundamentals in a readable format."""
-
+def print_fundamentals(ticker):
     data = get_fundamentals(ticker)
+
+    def fmt_pct(val): return f"{val*100:.1f}%" if val is not None else "N/A"
+    def fmt_num(val, dp=2): return f"{val:.{dp}f}" if val is not None else "N/A"
+    def fmt_large(val):
+        if val is None: return "N/A"
+        if abs(val) >= 1_000_000_000: return f"${val/1_000_000_000:.1f}B"
+        if abs(val) >= 1_000_000: return f"${val/1_000_000:.1f}M"
+        return f"${val:,.0f}"
 
     print(f"\n{'='*50}")
     print(f"  {data['name']} ({data['ticker']})")
-    print(f"  {data['sector']} | {data['industry']}")
+    print(f"  {data['sector']}")
     print(f"{'='*50}")
-
-    def fmt_pct(val):
-        return f"{val*100:.1f}%" if val is not None else "N/A"
-
-    def fmt_num(val, dp=2):
-        return f"{val:.{dp}f}" if val is not None else "N/A"
-
-    def fmt_large(val):
-        if val is None:
-            return "N/A"
-        if abs(val) >= 1_000_000_000:
-            return f"${val/1_000_000_000:.1f}B"
-        if abs(val) >= 1_000_000:
-            return f"${val/1_000_000:.1f}M"
-        return f"${val:,.0f}"
-
-    print(f"\n  PRICE & SIZE")
-    print(f"  Current Price:      {fmt_large(data['current_price'])}")
-    print(f"  Market Cap:         {fmt_large(data['market_cap'])}")
-    print(f"  52W High:           {fmt_large(data['week_52_high'])}")
-    print(f"  52W Low:            {fmt_large(data['week_52_low'])}")
-    print(f"  52W Position:       {fmt_pct(data['week_52_position'])}")
-
-    print(f"\n  VALUATION")
-    print(f"  P/E (Trailing):     {fmt_num(data['pe_trailing'])}")
-    print(f"  P/E (Forward):      {fmt_num(data['pe_forward'])}")
-    print(f"  P/B Ratio:          {fmt_num(data['pb_ratio'])}")
-    print(f"  P/S Ratio:          {fmt_num(data['ps_ratio'])}")
-    print(f"  EV/EBITDA:          {fmt_num(data['ev_ebitda'])}")
-
-    print(f"\n  PROFITABILITY")
-    print(f"  Gross Margin:       {fmt_pct(data['gross_margin'])}")
-    print(f"  Operating Margin:   {fmt_pct(data['operating_margin'])}")
-    print(f"  Net Margin:         {fmt_pct(data['net_margin'])}")
-    print(f"  ROE:                {fmt_pct(data['roe'])}")
-    print(f"  ROA:                {fmt_pct(data['roa'])}")
-
-    print(f"\n  GROWTH")
-    print(f"  Revenue Growth:     {fmt_pct(data['revenue_growth'])}")
-    print(f"  Earnings Growth:    {fmt_pct(data['earnings_growth'])}")
-    print(f"  Revenue (TTM):      {fmt_large(data['revenue_ttm'])}")
-
-    print(f"\n  FINANCIAL HEALTH")
-    print(f"  Debt/Equity:        {fmt_num(data['debt_to_equity'])}")
-    print(f"  Current Ratio:      {fmt_num(data['current_ratio'])}")
-    print(f"  Free Cash Flow:     {fmt_large(data['free_cash_flow'])}")
-    print(f"  Total Cash:         {fmt_large(data['total_cash'])}")
-    print(f"  Total Debt:         {fmt_large(data['total_debt'])}")
-
-    print(f"\n  ANALYST SENTIMENT")
-    print(f"  Recommendation:     {data['recommendation'] or 'N/A'}")
-    print(f"  Target Price:       {fmt_large(data['analyst_target'])}")
+    print(f"\n  Current Price:    {fmt_large(data['current_price'])}")
+    print(f"  Market Cap:       {fmt_large(data['market_cap'])}")
+    print(f"  52W Position:     {fmt_pct(data['week_52_position'])}")
+    print(f"  P/E (Trailing):   {fmt_num(data['pe_trailing'])}")
+    print(f"  Gross Margin:     {fmt_pct(data['gross_margin'])}")
+    print(f"  Net Margin:       {fmt_pct(data['net_margin'])}")
+    print(f"  ROE:              {fmt_pct(data['roe'])}")
+    print(f"  Revenue Growth:   {fmt_pct(data['revenue_growth'])}")
+    print(f"  Debt/Equity:      {fmt_num(data['debt_to_equity'])}")
+    print(f"  Current Ratio:    {fmt_num(data['current_ratio'])}")
+    print(f"  Free Cash Flow:   {fmt_large(data['free_cash_flow'])}")
     print()
 
 
 if __name__ == "__main__":
-    # Quick test — run this file directly to see output
     print_fundamentals("AAPL")
     print_fundamentals("TSLA")
