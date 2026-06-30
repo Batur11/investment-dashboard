@@ -7,6 +7,8 @@ from data.fetcher import get_fundamentals
 from scoring.scorer import score_company
 from scoring.explainer import explain_company
 from scoring.ai_summary import generate_summary
+from scoring.sector_comparison import get_sector_comparison
+from scoring.news_sentiment import get_news_sentiment
 from visuals.charts import (
     chart_price_history,
     chart_factor_scores,
@@ -195,6 +197,40 @@ def render_company_dashboard(ticker_input, period, show_ai=True, key_prefix=""):
                     st.error(f"Could not generate summary: {e}")
 
         st.divider()
+
+        st.markdown("<div class='section-header'>News Sentiment</div>", unsafe_allow_html=True)
+        if st.button("Check Recent News Sentiment", key=f"{key_prefix}news_{ticker_input}"):
+            with st.spinner("Pulling recent headlines and analysing sentiment..."):
+                try:
+                    news = get_news_sentiment(ticker_input)
+                    sentiment_colours = {
+                        "Positive": "#00C48C", "Slightly Positive": "#4D9FFF",
+                        "Neutral": "#FF9F40", "Slightly Negative": "#FF9F40",
+                        "Negative": "#FF4D4D", "No Data": "#8A94A6",
+                    }
+                    colour = sentiment_colours.get(news["sentiment"], "#8A94A6")
+
+                    st.markdown(f"""
+                    <div style='background-color:#1C2030; border:1px solid #2A3040; border-radius:10px; padding:20px; margin-bottom:16px;'>
+                        <span style='font-size:16px; font-weight:700; color:{colour};'>{news['sentiment']}</span>
+                        <p style='color:#C0C8D8; margin-top:8px; margin-bottom:0;'>{news['rationale']}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    if news["articles"]:
+                        for a in news["articles"][:6]:
+                            st.markdown(f"""
+                            <div style='padding:10px 0; border-bottom:1px solid #2A3040;'>
+                                <a href='{a["url"]}' target='_blank' style='color:#FAFAFA; text-decoration:none; font-weight:600; font-size:14px;'>{a["headline"]}</a>
+                                <div style='color:#8A94A6; font-size:12px; margin-top:2px;'>{a["source"]}</div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                    else:
+                        st.caption("No recent news found.")
+                except Exception as e:
+                    st.error(f"Could not load news sentiment: {e}")
+
+        st.divider()
         with st.expander("📋 Raw Data"):
             st.json(data)
 
@@ -244,7 +280,7 @@ st.markdown("<p style='color:#8A94A6; margin-top:-12px;'>Evidence-based company 
 
 st.divider()
 
-tab_research, tab_compare = st.tabs(["🔍 Research", "⚖️ Compare"])
+tab_research, tab_compare, tab_sector = st.tabs(["🔍 Research", "⚖️ Compare", "🏢 Sector"])
 
 # ── Tab 1: Research ───────────────────────────────────────────────────────────
 
@@ -335,5 +371,76 @@ with tab_compare:
             <div style='font-size:48px; margin-bottom:16px;'>⚖️</div>
             <div style='font-size:20px; font-weight:600; color:#FAFAFA; margin-bottom:8px;'>Enter two tickers to compare</div>
             <div style='font-size:14px;'>e.g. AAPL vs MSFT</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+# ── Tab 3: Sector Comparison ──────────────────────────────────────────────────
+
+with tab_sector:
+    sector_ticker = st.text_input(
+        "Ticker Symbol", placeholder="e.g. AAPL",
+        label_visibility="collapsed", key="sector_ticker"
+    ).upper().strip()
+
+    if sector_ticker:
+        with st.spinner(f"Finding peers and comparing {sector_ticker}..."):
+            try:
+                sector_data = get_sector_comparison(sector_ticker)
+
+                if sector_data["peer_count"] == 0:
+                    st.warning(f"No peer data found for **{sector_ticker}**. This may be an unusual or thinly-covered ticker.")
+                else:
+                    st.markdown(f"### {sector_data['name']} ({sector_ticker})")
+                    st.markdown(f"<p style='color:#8A94A6; margin-top:-12px;'>{sector_data['sector']} &nbsp;·&nbsp; Compared against {sector_data['peer_count']} peers: {', '.join(sector_data['peers'])}</p>", unsafe_allow_html=True)
+
+                    st.divider()
+                    st.markdown("<div class='section-header'>Metric vs Peer Average</div>", unsafe_allow_html=True)
+
+                    for item in sector_data["comparison"]:
+                        target_val = item["target_value"]
+                        peer_avg   = item["peer_average"]
+                        verdict    = item["verdict"]
+                        unit       = item["unit"]
+
+                        if target_val is None or peer_avg is None:
+                            continue
+
+                        if unit == "%":
+                            target_str = f"{target_val*100:.1f}%"
+                            peer_str   = f"{peer_avg*100:.1f}%"
+                        else:
+                            target_str = f"{target_val:.2f}{unit}"
+                            peer_str   = f"{peer_avg:.2f}{unit}"
+
+                        if verdict:
+                            colour = "#00C48C" if verdict["is_better"] else "#FF4D4D"
+                            arrow  = "▲" if verdict["diff_pct"] > 0 else "▼"
+                            diff_label = f"{arrow} {abs(verdict['diff_pct']):.0f}% vs peers"
+                        else:
+                            colour = "#8A94A6"
+                            diff_label = "N/A"
+
+                        col_label, col_target, col_peer, col_verdict = st.columns([2, 1.5, 1.5, 2])
+                        with col_label:
+                            st.markdown(f"<div style='padding:10px 0; color:#FAFAFA; font-weight:600;'>{item['label']}</div>", unsafe_allow_html=True)
+                        with col_target:
+                            st.markdown(f"<div style='padding:10px 0; color:#FAFAFA;'>{sector_ticker}: <b>{target_str}</b></div>", unsafe_allow_html=True)
+                        with col_peer:
+                            st.markdown(f"<div style='padding:10px 0; color:#8A94A6;'>Peers avg: {peer_str}</div>", unsafe_allow_html=True)
+                        with col_verdict:
+                            st.markdown(f"<div style='padding:10px 0; color:{colour}; font-weight:600;'>{diff_label}</div>", unsafe_allow_html=True)
+
+                    st.divider()
+                    st.caption("Peer average calculated from publicly listed direct competitors. 'Better' is directional only — not a recommendation.")
+
+            except Exception as e:
+                st.error("Could not load sector comparison.")
+                st.exception(e)
+    else:
+        st.markdown("""
+        <div style='text-align:center; padding: 80px 0; color:#8A94A6;'>
+            <div style='font-size:48px; margin-bottom:16px;'>🏢</div>
+            <div style='font-size:20px; font-weight:600; color:#FAFAFA; margin-bottom:8px;'>Enter a ticker to see how it compares to its sector</div>
+            <div style='font-size:14px;'>e.g. AAPL — compared against Dell, HP, NetApp and others</div>
         </div>
         """, unsafe_allow_html=True)
